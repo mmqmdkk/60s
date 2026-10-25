@@ -30,47 +30,100 @@ class ServiceBili {
     }
   }
 
-  async #fetch() {
-    const options = {
-      headers: {
-        'User-Agent': Common.chromeUA,
-        'X-Real-IP': '157.255.219.143',
-        'X-Forwarded-For': '157.255.219.143',
-      },
+  async #fetch(): Promise<Item[]> {
+    try {
+      return await this.#fetchOfficial()
+    } catch {
+      return await this.#fetchAa1()
+    }
+  }
+
+  async #fetchOfficial(): Promise<Item[]> {
+    const headers: Record<string, string> = {
+      'User-Agent': Common.chromeUA,
+      'Referer': 'https://www.bilibili.com/',
+      'Origin': 'https://www.bilibili.com',
     }
 
     try {
-      const api = 'https://api.bilibili.com/x/web-interface/wbi/search/square?limit=50'
-      const { data = {} } = await (await fetch(api, options)).json()
-
-      return ((data?.trending?.list || []) as Item[]).map((item) => {
-        return {
-          title: item.keyword || item.show_name,
-          link: `https://search.bilibili.com/all?keyword=${encodeURIComponent(item.keyword)}`,
-        }
-      })
+      const spiResponse = await fetch('https://api.bilibili.com/x/frontend/finger/spi', { headers })
+      const spi = await spiResponse.json()
+      const b3 = spi?.data?.b_3
+      const b4 = spi?.data?.b_4
+      if (b3 && b4) {
+        headers.Cookie = `buvid3=${b3}; buvid4=${b4}`
+      }
     } catch {
-      const api = 'https://app.bilibili.com/x/v2/search/trending/ranking?limit=50'
-      const { data = {} } = await (await fetch(api, options)).json()
+      // 忽略访客 Cookie 获取失败，继续尝试公开接口。
+    }
 
-      return ((data?.list?.filter((e: any) => +e?.is_commercial === 0) || []) as Item[]).map((item) => {
+    const apis = [
+      'https://api.bilibili.com/x/web-interface/wbi/search/square?limit=50',
+      'https://app.bilibili.com/x/v2/search/trending/ranking?limit=50',
+      'https://s.search.bilibili.com/main/hotword',
+    ]
+
+    for (const api of apis) {
+      try {
+        const response = await fetch(api, { headers })
+        if (!response.ok) {
+          continue
+        }
+        const payload = await response.json()
+        const list = payload?.data?.trending?.list ?? payload?.data?.list ?? payload?.list
+        const normalized = this.#normalize(list)
+        if (normalized.length > 0) {
+          return normalized
+        }
+      } catch {
+        // 尝试下一个 B 站官方端点。
+      }
+    }
+
+    throw new Error('Bilibili official endpoints returned no usable data')
+  }
+
+  async #fetchAa1(): Promise<Item[]> {
+    const response = await fetch('https://v.api.aa1.cn/api/bilibili-rs/')
+    if (!response.ok) {
+      throw new Error(`Aa1 Bilibili API returned HTTP ${response.status}`)
+    }
+
+    const payload = await response.json()
+    const normalized = this.#normalize(payload?.data)
+    if (normalized.length === 0) {
+      throw new Error('Aa1 Bilibili API returned no usable data')
+    }
+    return normalized
+  }
+
+  #normalize(list: unknown): Item[] {
+    if (!Array.isArray(list)) {
+      return []
+    }
+
+    return list
+      .map((item: any) => {
+        const title = String(item?.keyword || item?.show_name || item?.title || item?.word || '').trim()
+        const rawLink = String(item?.link || item?.url || '').trim()
+        const link =
+          rawLink ||
+          (title ? `https://search.bilibili.com/all?keyword=${encodeURIComponent(title)}` : '')
+
         return {
-          title: item.keyword || item.show_name,
-          link: `https://search.bilibili.com/all?keyword=${encodeURIComponent(item.keyword)}`,
+          title,
+          link,
+          hot: String(item?.hot_value || item?.hot || item?.heat || ''),
         }
       })
-    }
+      .filter((item) => item.title)
   }
 }
 
 export const serviceBili = new ServiceBili()
 
 interface Item {
-  icon?: string
-  hot_id: number
-  keyword: string
-  position: number
-  show_name: string
-  word_type: number
-  is_commercial: string
+  title: string
+  link: string
+  hot?: string
 }
